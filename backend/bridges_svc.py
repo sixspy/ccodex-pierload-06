@@ -39,10 +39,15 @@ def get_bridge(bridge_id: int, authorization: AuthHeader = None):
                WHERE l.bridge_id=? AND t.status NOT IN ('作废','已封闸')""",
             (bridge_id,),
         ).fetchone()
+        disabled = conn.execute(
+            "SELECT COUNT(*) c FROM weigh_lanes WHERE bridge_id=? AND status='停用'",
+            (bridge_id,),
+        ).fetchone()["c"]
         return {
             "bridge": dict(row),
             "lanes": [dict(x) for x in lanes],
             "active_tickets": stats["active"],
+            "disabled_lanes": disabled,
         }
 
 

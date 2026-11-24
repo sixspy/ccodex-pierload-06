@@ -42,27 +42,54 @@ def _reconcile_bl(conn, bl_code: str) -> dict:
     bl = conn.execute(
         "SELECT * FROM bl_manifests WHERE bl_code=?", (bl_code,)
     ).fetchone()
-    tickets = conn.execute(
-        """SELECT ticket_code, gross_t, status, generation FROM weigh_tickets
-           WHERE bl_ref=? AND status NOT IN ('作废')""",
+    # 口径落库唯一：车道状态以 weigh_lanes.status 为准，停用车道流量零计入。
+    rows = conn.execute(
+        """SELECT t.ticket_code, t.gross_t, t.status, t.generation,
+                  l.lane_code, l.status lane_status
+           FROM weigh_tickets t
+           JOIN weigh_lanes l ON l.id=t.lane_id
+           WHERE t.bl_ref=? AND t.status NOT IN ('作废')
+           ORDER BY t.id""",
         (bl_code,),
     ).fetchall()
-    if not tickets:
+    active = [t for t in rows if t["lane_status"] != "停用"]
+    excluded = [
+        {
+            "ticket_code": t["ticket_code"],
+            "lane_code": t["lane_code"],
+            "gross_t": t["gross_t"],
+            "reason": "车道停用禁磅，流量零计入",
+        }
+        for t in rows
+        if t["lane_status"] == "停用"
+    ]
+    if not active:
         return {
             "bl_code": bl_code,
             "declared_gross_t": bl["declared_gross_t"],
             "ticket_sum_t": 0,
             "balanced": False,
-            "reason": "无过磅票",
+            "reason": "无过磅票" if not rows else "在运车道无计入流量（停用零计入）",
             "tickets": [],
+            "deactivated_excluded": excluded,
         }
-    ticket_sum = round(sum(float(t["gross_t"]) for t in tickets), 3)
+    tickets = [
+        {
+            "ticket_code": t["ticket_code"],
+            "gross_t": t["gross_t"],
+            "status": t["status"],
+            "generation": t["generation"],
+        }
+        for t in active
+    ]
+    ticket_sum = round(sum(float(t["gross_t"]) for t in active), 3)
     declared = float(bl["declared_gross_t"])
     matched = validate_bl_match(declared, ticket_sum, tolerance=0.1)
     seal_rows = conn.execute(
         """SELECT s.seal_ref, s.ticket_generation, t.ticket_code
            FROM gate_seals s JOIN weigh_tickets t ON t.id=s.ticket_id
-           WHERE t.bl_ref=?""",
+           JOIN weigh_lanes l ON l.id=t.lane_id
+           WHERE t.bl_ref=? AND l.status!='停用'""",
         (bl_code,),
     ).fetchall()
     proof_ok = matched and len(seal_rows) >= 1
@@ -73,8 +100,9 @@ def _reconcile_bl(conn, bl_code: str) -> dict:
         "balanced": matched,
         "proof_ready": proof_ok,
         "seal_count": len(seal_rows),
-        "tickets": [dict(t) for t in tickets],
+        "tickets": tickets,
         "seals": [dict(s) for s in seal_rows],
+        "deactivated_excluded": excluded,
     }
 
 

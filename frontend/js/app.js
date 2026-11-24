@@ -171,6 +171,17 @@ createApp({
       try { await api.createLane(laneForm.value); flashOk("车道已开通"); await refresh(); }
       catch (e) { flashErr(e); }
     }
+    async function deactivateLane(laneId) {
+      clearFlash();
+      try {
+        const r = await api.deactivateLane(laneId, "停用禁磅纪要（甲路径，当日锁死）");
+        flashOk(`已落 ${r.ruling_no}：${r.lane_code} 停用禁磅，过磅写口零增回滚`);
+        await refresh();
+      } catch (e) { flashErr(e); }
+    }
+    function disabledCountByBridge(bridgeId) {
+      return lanes.value.filter((l) => l.bridge_id === bridgeId && l.status === "停用").length;
+    }
     async function createTicket() {
       clearFlash();
       try {
@@ -269,7 +280,7 @@ createApp({
       adjudicableTickets, releasableTickets, sealableTickets,
       login, logout, refresh,
       fmtT, ticketClass, shortText,
-      createBridge, loadBridgeDetail, createLane, createTicket, loadTicketDetail, selectTicket,
+      createBridge, loadBridgeDetail, createLane, deactivateLane, disabledCountByBridge, createTicket, loadTicketDetail, selectTicket,
       openOverload, closeOverload, releaseGate, createSeal, registerBl, addLineage,
       loadReconcile, loadAllReconcile, loadProof, enqueueCustoms, enqueueCrane,
     };
@@ -325,3 +336,4 @@ createApp({
     </div>
   `,
 }).mount("#app");
+

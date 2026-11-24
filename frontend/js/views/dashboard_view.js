@@ -4,6 +4,8 @@ export const dashboardViewTemplate = `
   <p class="hint">过磅票入闸后裁定超重才放行，驳回进旁路挂起；闸代快照须与提单册对账。</p>
   <div class="hero-cards">
     <div class="hero-card"><span class="t">地磅桥</span><div class="n">{{ dash.bridges ?? '—' }}</div></div>
+    <div class="hero-card"><span class="t">车道</span><div class="n">{{ dash.lanes ?? '—' }}</div></div>
+    <div class="hero-card"><span class="t">停用禁磅车道</span><div class="n">{{ dash.disabled_lanes ?? 0 }}</div></div>
     <div class="hero-card"><span class="t">开放超重</span><div class="n">{{ dash.open_overloads ?? '—' }}</div></div>
     <div class="hero-card"><span class="t">旁路挂起</span><div class="n">{{ dash.side_pending ?? '—' }}</div></div>
     <div class="hero-card"><span class="t">过磅票</span><div class="n">{{ dash.tickets ?? '—' }}</div></div>

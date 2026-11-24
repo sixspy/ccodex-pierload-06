@@ -6,8 +6,8 @@ import json
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
-from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from db import connect, now_iso, write_audit, write_connect
+from locks import release_lock, require_lock_key
 from models import TicketIn
 from validators import (
     adjudicate_overload,
@@ -92,91 +92,108 @@ def get_ticket(ticket_id: int, authorization: AuthHeader = None):
 def create_ticket(body: TicketIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
     lock_key = f"lane:{body.lane_id}"
-    with connect() as conn:
-        require_lock(conn, lock_key, user)
-        try:
-            lane = conn.execute(
-                """SELECT l.*, b.max_gross_t, b.axle_limit FROM weigh_lanes l
-                   JOIN weigh_bridges b ON b.id=l.bridge_id WHERE l.id=?""",
-                (body.lane_id,),
-            ).fetchone()
-            if not lane:
-                raise HTTPException(404, "车道不存在")
-            validate_lane_open(dict(lane))
-            axles = [a.model_dump() for a in body.axle_weights]
-            validate_axle_count(axles, int(lane["axle_limit"]))
-            gross, _peak, _spread = validate_axle_weights(axles)
-            validate_gross_cap(gross, float(lane["max_gross_t"]))
-            bl = conn.execute(
-                "SELECT * FROM bl_manifests WHERE bl_code=?", (body.bl_ref,)
-            ).fetchone()
-            if not bl:
-                raise HTTPException(422, "提单册未登记")
-            is_over, overweight = adjudicate_overload(
-                gross, float(lane["overload_threshold_t"])
-            )
-            code = body.ticket_code or _next_ticket_code(conn, body.lane_id)
-            if conn.execute(
-                "SELECT id FROM weigh_tickets WHERE ticket_code=?", (code,)
-            ).fetchone():
-                raise HTTPException(409, "票号已存在")
-            now = now_iso()
-            if is_over:
-                status = "旁路挂起"
-            else:
-                status = "已裁定"
-            cur = conn.execute(
-                """INSERT INTO weigh_tickets(ticket_code,lane_id,bl_ref,vehicle_plate,
-                   axle_weights,gross_t,generation,status,adjudicated_at,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    code,
-                    body.lane_id,
-                    body.bl_ref,
-                    body.vehicle_plate,
-                    json.dumps(axles, ensure_ascii=False),
-                    gross,
-                    1,
-                    status,
-                    now if status == "已裁定" else None,
-                    now,
-                ),
-            )
-            ticket_id = cur.lastrowid
-            if is_over:
-                hold_key = f"HOLD-{code}"
-                conn.execute(
-                    """INSERT INTO overload_holds(ticket_id,hold_key,overweight_t,threshold_t,
-                       status,opened_at,side_lane_note) VALUES (?,?,?,?,?,?,?)""",
-                    (
-                        ticket_id,
-                        hold_key,
-                        overweight,
-                        float(lane["overload_threshold_t"]),
-                        "开放",
-                        now,
-                        lane["side_lane_ref"] or "旁路待驳",
-                    ),
-                )
-            write_audit(
-                conn,
-                user,
-                "ticket_weigh",
-                code,
-                {
-                    "ticket_id": ticket_id,
-                    "gross_t": gross,
-                    "status": status,
-                    "overload": is_over,
-                },
-            )
-            conn.commit()
-            return {
-                "id": ticket_id,
-                "ticket_code": code,
-                "gross_t": gross,
-                "status": status,
-                "overload": is_over,
-            }
-        finally:
-            release(conn, lock_key, user)
+    # 独立短事务抢车道锁：争用即 409，后到只记争用痕，不进入业务事务。
+    require_lock_key(lock_key, user)
+    try:
+        with write_connect() as conn:
+            result = _create_ticket_tx(conn, body, user)
+        # 业务 IMMEDIATE 事务已关闭（提交或回滚）后才放锁，
+        # 使持锁行覆盖整个业务事务，竞争者在其存活期内必撞锁、只记争用痕。
+        return result
+    finally:
+        release_lock(lock_key, user)
+
+
+def _create_ticket_tx(conn, body, user):
+    lane = conn.execute(
+        """SELECT l.*, b.max_gross_t, b.axle_limit FROM weigh_lanes l
+           JOIN weigh_bridges b ON b.id=l.bridge_id WHERE l.id=?""",
+        (body.lane_id,),
+    ).fetchone()
+    if not lane:
+        raise HTTPException(404, "车道不存在")
+    if lane["status"] == "停用":
+        # 停用禁磅（甲路径）：偏离纪要只记停用禁磅偏航，业务零增并整笔回滚，
+        # 禁止出正式票，禁止任何乙路径影子挂起票写法。
+        write_audit(
+            conn,
+            user,
+            "停用禁磅偏航",
+            lane["lane_code"],
+            {"lane_id": body.lane_id, "reason": "车道已停用仍请求过磅写口"},
+        )
+        conn.commit()  # 偏航痕落库；未写任何业务表，业务零增
+        raise HTTPException(409, "停用禁磅：车道已停用，过磅写口禁止落正式票")
+    validate_lane_open(dict(lane))
+    axles = [a.model_dump() for a in body.axle_weights]
+    validate_axle_count(axles, int(lane["axle_limit"]))
+    gross, _peak, _spread = validate_axle_weights(axles)
+    validate_gross_cap(gross, float(lane["max_gross_t"]))
+    bl = conn.execute(
+        "SELECT * FROM bl_manifests WHERE bl_code=?", (body.bl_ref,)
+    ).fetchone()
+    if not bl:
+        raise HTTPException(422, "提单册未登记")
+    is_over, overweight = adjudicate_overload(
+        gross, float(lane["overload_threshold_t"])
+    )
+    code = body.ticket_code or _next_ticket_code(conn, body.lane_id)
+    if conn.execute(
+        "SELECT id FROM weigh_tickets WHERE ticket_code=?", (code,)
+    ).fetchone():
+        raise HTTPException(409, "票号已存在")
+    now = now_iso()
+    status = "旁路挂起" if is_over else "已裁定"
+    cur = conn.execute(
+        """INSERT INTO weigh_tickets(ticket_code,lane_id,bl_ref,vehicle_plate,
+           axle_weights,gross_t,generation,status,adjudicated_at,created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            code,
+            body.lane_id,
+            body.bl_ref,
+            body.vehicle_plate,
+            json.dumps(axles, ensure_ascii=False),
+            gross,
+            1,
+            status,
+            now if status == "已裁定" else None,
+            now,
+        ),
+    )
+    ticket_id = cur.lastrowid
+    if is_over:
+        hold_key = f"HOLD-{code}"
+        conn.execute(
+            """INSERT INTO overload_holds(ticket_id,hold_key,overweight_t,threshold_t,
+               status,opened_at,side_lane_note) VALUES (?,?,?,?,?,?,?)""",
+            (
+                ticket_id,
+                hold_key,
+                overweight,
+                float(lane["overload_threshold_t"]),
+                "开放",
+                now,
+                lane["side_lane_ref"] or "旁路待驳",
+            ),
+        )
+    write_audit(
+        conn,
+        user,
+        "ticket_weigh",
+        code,
+        {
+            "ticket_id": ticket_id,
+            "gross_t": gross,
+            "status": status,
+            "overload": is_over,
+        },
+    )
+    conn.commit()
+    return {
+        "id": ticket_id,
+        "ticket_code": code,
+        "gross_t": gross,
+        "status": status,
+        "overload": is_over,
+    }

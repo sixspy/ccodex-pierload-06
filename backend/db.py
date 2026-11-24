@@ -39,6 +39,19 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def write_connect() -> sqlite3.Connection:
+    """写口连接：BEGIN IMMEDIATE 起事务，建连即持有库级写锁。
+
+    嵌入式车道锁依赖它把“先 SELECT 后 INSERT”的 BUSY 窗口压成原子：
+    第二个写口在 BEGIN IMMEDIATE 即排队，等前一个事务结束后才入场，
+    此时 pier_locks 必有持锁行，INSERT OR IGNORE 必判争用。
+    """
+    conn = connect()
+    conn.isolation_level = None  # 手动事务，避免隐式 BEGIN(deferred)
+    conn.execute("BEGIN IMMEDIATE")
+    return conn
+
+
 def sha_password(password: str) -> str:
     import hashlib
 
@@ -147,6 +160,18 @@ CREATE TABLE IF NOT EXISTS pier_locks(
   lock_key TEXT PRIMARY KEY,
   holder TEXT NOT NULL,
   acquired_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS disable_rulings(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ruling_no TEXT UNIQUE NOT NULL,
+  lane_id INTEGER NOT NULL,
+  lane_code TEXT NOT NULL,
+  path TEXT NOT NULL,
+  note TEXT,
+  actor TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT '当日锁死',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(lane_id) REFERENCES weigh_lanes(id)
 );
 CREATE TABLE IF NOT EXISTS contention_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -273,6 +298,40 @@ def _lane_id(conn, code: str) -> int | None:
         "SELECT id FROM weigh_lanes WHERE lane_code=?", (code,)
     ).fetchone()
     return int(row["id"]) if row else None
+
+
+# 停用禁磅裁决口径：甲路径——停用即零增回滚，当日锁死，禁止旁门（无乙路径）。
+# 第6号为车道案己首份锁死纪要（LN-F03 停用禁磅），后续裁决自第7号续号。
+RULING_NO6 = "停用禁磅第6号"
+RULING_SERIES_START = 6
+
+
+def seed_disable_rulings(conn: sqlite3.Connection) -> None:
+    """为种子即停用的车道补当日锁死纪要（第6号，车道案己）。"""
+    disabled = conn.execute(
+        "SELECT id, lane_code, created_at FROM weigh_lanes WHERE status='停用'"
+    ).fetchall()
+    n = 0
+    for lane in disabled:
+        if conn.execute(
+            "SELECT id FROM disable_rulings WHERE lane_id=?", (lane["id"],)
+        ).fetchone():
+            continue
+        n += 1
+        conn.execute(
+            """INSERT INTO disable_rulings(ruling_no,lane_id,lane_code,path,note,
+               actor,status,created_at) VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                f"停用禁磅第{RULING_SERIES_START + n - 1}号",
+                lane["id"],
+                lane["lane_code"],
+                "甲",
+                "种子车道停用禁磅：过磅写口零增并整笔回滚",
+                "系统",
+                "当日锁死",
+                lane["created_at"] or now_iso(),
+            ),
+        )
 
 
 def seed_tickets(conn: sqlite3.Connection) -> None:
@@ -442,6 +501,7 @@ def init_db() -> None:
         seed_users(conn)
         seed_bridges(conn)
         seed_lanes(conn)
+        seed_disable_rulings(conn)
         seed_bl_manifests(conn)
         seed_tickets(conn)
         seed_overloads(conn)
@@ -477,9 +537,13 @@ def dashboard_stats(conn: sqlite3.Connection) -> dict:
         """SELECT COUNT(*) c FROM weigh_tickets
            WHERE status='旁路挂起'"""
     ).fetchone()["c"]
+    disabled_lanes = conn.execute(
+        "SELECT COUNT(*) c FROM weigh_lanes WHERE status='停用'"
+    ).fetchone()["c"]
     return {
         "bridges": bridges,
         "lanes": lanes,
+        "disabled_lanes": disabled_lanes,
         "tickets": tickets,
         "open_overloads": open_holds,
         "gate_releases": released,

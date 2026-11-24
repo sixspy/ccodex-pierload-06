@@ -1,7 +1,7 @@
 export const bridgesViewTemplate = `
 <section class="panel">
   <h2>地磅桥登记</h2>
-  <p class="hint">登记港区地磅额定毛重与轴数上限，供车道阈值引用。</p>
+  <p class="hint">登记港区地磅额定毛重与轴数上限，供车道阈值引用。停用车道在所属地磅下计入禁磅数，口径与车道页一致。</p>
   <div class="form-row">
     <div><label>地磅编码</label><input v-model="bridgeForm.bridge_code"/></div>
     <div><label>港区</label><input v-model="bridgeForm.pier_zone"/></div>
@@ -14,7 +14,7 @@ export const bridgesViewTemplate = `
     <button class="secondary" @click="refresh">刷新</button>
   </div>
   <table class="data-table">
-    <thead><tr><th>编码</th><th>港区</th><th>名称</th><th>额定量程</th><th>轴限</th><th>状态</th><th></th></tr></thead>
+    <thead><tr><th>编码</th><th>港区</th><th>名称</th><th>额定量程</th><th>轴限</th><th>状态</th><th>停用禁磅车道</th><th></th></tr></thead>
     <tbody>
       <tr v-for="b in bridges" :key="b.id">
         <td>{{ b.bridge_code }}</td>
@@ -23,13 +23,25 @@ export const bridgesViewTemplate = `
         <td>{{ b.max_gross_t }}t</td>
         <td>{{ b.axle_limit }}</td>
         <td><span class="badge" :class="b.status==='运行'?'pass':'warn'">{{ b.status }}</span></td>
+        <td>
+          <span v-if="disabledCountByBridge(b.id) > 0" class="badge fail">{{ disabledCountByBridge(b.id) }} 条禁磅</span>
+          <span v-else class="muted">0</span>
+        </td>
         <td><button class="mini-btn" @click="loadBridgeDetail(b.id)">车道</button></td>
       </tr>
     </tbody>
   </table>
   <div v-if="bridgeDetail" class="detail-box">
     <h3>{{ bridgeDetail.bridge.name }} · {{ bridgeDetail.bridge.bridge_code }}</h3>
-    <p>在港票 {{ bridgeDetail.active_tickets }} · 车道 {{ bridgeDetail.lanes.length }} 条</p>
+    <p>在港票 {{ bridgeDetail.active_tickets }} · 车道 {{ bridgeDetail.lanes.length }} 条 · 停用禁磅 {{ bridgeDetail.disabled_lanes }} 条</p>
+    <ul>
+      <li v-for="x in bridgeDetail.lanes" :key="x.id">
+        {{ x.lane_code }} ·
+        <span v-if="x.status==='停用'" class="badge fail">停用 · 禁磅</span>
+        <span v-else>{{ x.status }}</span>
+      </li>
+    </ul>
   </div>
 </section>
 `;
+

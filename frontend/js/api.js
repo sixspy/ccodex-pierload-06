@@ -44,5 +44,9 @@ export function createApi(getToken, onUnauthorized) {
     craneJobs: () => req("/api/crane/jobs"),
     craneStub: (d) => req("/api/crane-stub", { method: "POST", body: JSON.stringify(d) }),
     contention: () => req("/api/contention"),
+    rulings: () => req("/api/rulings"),
+    deactivateLane: (id, note) =>
+      req(`/api/lanes/${id}/deactivate`, { method: "PATCH", body: JSON.stringify({ note }) }),
   };
 }
+

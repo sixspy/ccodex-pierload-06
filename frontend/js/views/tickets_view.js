@@ -5,7 +5,9 @@ export const ticketsViewTemplate = `
   <div class="form-row">
     <div><label>车道</label>
       <select v-model.number="ticketForm.lane_id">
-        <option v-for="l in lanes" :key="l.id" :value="l.id">{{ l.lane_code }}</option>
+        <option v-for="l in lanes" :key="l.id" :value="l.id" :disabled="l.status==='停用'">
+          {{ l.lane_code }}{{ l.status==='停用' ? '（停用·禁磅）' : '' }}
+        </option>
       </select>
     </div>
     <div><label>提单号</label>

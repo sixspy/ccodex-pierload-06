@@ -19,6 +19,7 @@ from lanes_svc import router as lanes_router
 from locks import router as locks_router
 from overload_svc import router as overload_router
 from reconcile_svc import router as reconcile_router
+from rulings_svc import router as rulings_router
 from seal_svc import router as seal_router
 from tickets_svc import router as tickets_router
 
@@ -45,6 +46,7 @@ for r in (
     bl_router,
     lineage_router,
     reconcile_router,
+    rulings_router,
     locks_router,
     audit_router,
     customs_router,
